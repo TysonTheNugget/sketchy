@@ -84,7 +84,7 @@ def index():
         raw_o = request.form["owner"].strip()
         try:
             o = Web3.to_checksum_address(raw_o)
-            user_toks = fetch_my_tokens CONTRACT_ADDRESS, o)
+            user_toks = fetch_my_tokens(CONTRACT_ADDRESS, o)  # Fixed syntax error
         except Exception as e:
             error = f"🚨 {e}"
 
