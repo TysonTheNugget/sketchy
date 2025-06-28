@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request, jsonify
+from flask import Flask, request, jsonify
 from flask_cors import CORS
 from web3 import Web3
 import os
@@ -75,20 +75,9 @@ def fetch_my_tokens(c_addr, owner):
     except Exception:
         return fetch_via_logs(c_addr, owner)
 
-@app.route("/", methods=["GET", "POST"])
+@app.route("/", methods=["GET"])
 def index():
-    error = None
-    user_toks = None
-
-    if request.method == "POST":
-        raw_o = request.form["owner"].strip()
-        try:
-            o = Web3.to_checksum_address(raw_o)
-            user_toks = fetch_my_tokens(CONTRACT_ADDRESS, o)  # Fixed syntax error
-        except Exception as e:
-            error = f"🚨 {e}"
-
-    return render_template("index.html", error=error, user_toks=user_toks)
+    return jsonify({"message": "Welcome to SketchyMilio API. Use /api/tokens with POST to fetch tokens."})
 
 @app.route("/api/tokens", methods=["POST"])
 def get_tokens():
