@@ -2,6 +2,7 @@ from flask import Flask, render_template, request, jsonify
 from flask_cors import CORS
 from web3 import Web3
 import os
+from supabase import create_client, Client
 
 app = Flask(__name__)
 CORS(app, resources={r"/api/*": {"origins": ["https://www.mymilio.xyz", "http://localhost:3000"]}})  # Allow frontend and local dev
@@ -11,6 +12,11 @@ RPC_URL = os.getenv("RPC_URL", "https://api.mainnet.abs.xyz")
 w3 = Web3(Web3.HTTPProvider(RPC_URL))
 if not w3.is_connected():
     raise RuntimeError("❌ Could not connect to Abstract RPC")
+
+# Supabase setup
+SUPABASE_URL = os.getenv("SUPABASE_URL", "https://vkxchgckwyqnxlmirqqu.supabase.co")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZreGNoZ2Nrd3lxbnhsbWlycXF1Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc1MTE1MzAwOCwiZXhwIjoyMDY2NzI5MDA4fQ.3L5JOHUPlx3O4toJ4amC9fiHc-vDmItCZ57DnGNvW70")
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # SketchyMilio contract
 CONTRACT_ADDRESS = Web3.to_checksum_address("0x08533A2b16e3db03eeBD5b23210122f97dfcb97d")
@@ -98,6 +104,24 @@ def get_tokens():
         return jsonify({"tokens": tokens, "error": None})
     except Exception as e:
         return jsonify({"tokens": None, "error": str(e)}), 400
+
+@app.route("/api/claim_points", methods=["POST"])
+def claim_points():
+    try:
+        owner = Web3.to_checksum_address(request.form["owner"].strip())
+        tokens = fetch_my_tokens(CONTRACT_ADDRESS, owner)
+        points = len(tokens) * 10  # 10 points per token
+
+        # Upsert points in Supabase
+        data = {"address": owner.lower(), "points": points}
+        result = supabase.table("points").upsert(data).execute()
+
+        if result.data:
+            return jsonify({"success": True, "points": points, "error": None})
+        else:
+            return jsonify({"success": False, "error": "Failed to save points"}), 500
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 400
 
 if __name__ == "__main__":
     app.run(debug=True)
