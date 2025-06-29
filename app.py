@@ -182,5 +182,20 @@ def claim_points():
         logger.error(f"Error in claim_points: {e}")
         return jsonify({"success": False, "error": str(e)}), 400
 
+@app.route("/api/leaderboard", methods=["GET"])
+def get_leaderboard():
+    try:
+        # Query the points table, sort by points in descending order, limit to 100
+        result = supabase.table("points").select("address, points").order("points", desc=True).limit(100).execute()
+        leaderboard_data = [
+            {"wallet": row["address"], "points": row["points"]}
+            for row in result.data
+        ]
+        logger.info(f"Fetched leaderboard with {len(leaderboard_data)} entries")
+        return jsonify({"leaderboard": leaderboard_data, "error": None})
+    except Exception as e:
+        logger.error(f"Error in get_leaderboard: {e}")
+        return jsonify({"leaderboard": [], "error": str(e)}), 500
+
 if __name__ == "__main__":
     app.run(debug=True)
