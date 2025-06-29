@@ -3,6 +3,5 @@ web3==6.20.0
 gunicorn==22.0.0
 Flask-CORS==4.0.1
 supabase==2.9.1
-flask-limiter==2.0.1  # Pinned to older version
+flask-limiter==2.0.1
 flask-wtf==1.2.1
-python-supabase
