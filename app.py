@@ -1,7 +1,5 @@
 from flask import Flask, render_template, request, jsonify
 from flask_cors import CORS
-from flask_limiter import Limiter
-from flask_limiter.util import get_remote_address
 from flask_wtf.csrf import CSRFProtect, generate_csrf
 from web3 import Web3
 import os
@@ -17,7 +15,6 @@ CORS(app, resources={r"/api/*": {
     "supports_credentials": True
 }})  # Only production origin with credentials
 csrf = CSRFProtect(app)  # CSRF protection
-limiter = Limiter(app, get_remote_address, default_limits=["200 per day", "50 per hour"])  # Positional key_func for older versions
 
 # —— CONFIG ——  
 RPC_URL = os.getenv("RPC_URL", "https://api.mainnet.abs.xyz")
@@ -122,8 +119,7 @@ def index():
                            user_toks=user_toks)
 
 @app.route("/api/tokens", methods=["POST"])
-@csrf.exempt  # Exempt if index.html still uses this
-@limiter.limit("10 per minute")  # 10 requests per minute per IP
+@csrf.exempt  # Exempt for index.html compatibility
 def get_tokens():
     try:
         owner = validate_address(request.form.get("owner", "").strip())
@@ -134,7 +130,6 @@ def get_tokens():
 
 @app.route("/api/claim_points", methods=["POST"])
 @csrf.required  # Require CSRF token
-@limiter.limit("5 per minute")  # Stricter for points claiming
 def claim_points():
     try:
         owner = validate_address(request.form.get("owner", "").strip())
