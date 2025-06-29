@@ -3,20 +3,20 @@ from flask_cors import CORS
 from web3 import Web3
 import os
 from supabase import create_client, Client
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone  # **Added for timestamp handling**
 
 app = Flask(__name__)
-CORS(app, resources={r"/api/*": {"origins": ["https://www.mymilio.xyz", "http://localhost:3000"]}})
+CORS(app, resources={r"/api/*": {"origins": ["https://www.mymilio.xyz", "http://localhost:3000"]}})  # Allow frontend and local dev
 
 # —— CONFIG ——
-RPC_URL = os.environ.get("RPC_URL", "https://api.mainnet.abs.xyz")
+RPC_URL = os.getenv("RPC_URL", "https://api.mainnet.abs.xyz")
 w3 = Web3(Web3.HTTPProvider(RPC_URL))
 if not w3.is_connected():
     raise RuntimeError("❌ Could not connect to Abstract RPC")
 
 # Supabase setup
-SUPABASE_URL = os.environ.get("SUPABASE_URL", "https://vkxchgckwyqnxlmirqqu.supabase.co")
-SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "<Your Supabase Service Key>")
+SUPABASE_URL = os.getenv("SUPABASE_URL", "https://vkxchgckwyqnxlmirqqu.supabase.co")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY", "<Your Supabase Service Key>")
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # SketchyMilio contract
@@ -44,8 +44,8 @@ def fetch_via_logs(c_addr, owner, start_block=0, chunk=200_000):
     latest = w3.eth.block_number
     myset = set()
 
-    for frm in range(start_block, latest + 1, chunk):
-        to = min(frm + chunk - 1, latest)
+    for frm in range(start_block, latest+1, chunk):
+        to = min(frm+chunk-1, latest)
         logs = w3.eth.get_logs({
             "fromBlock": frm, "toBlock": to,
             "address": c_addr, "topics": [None]
@@ -109,46 +109,31 @@ def claim_points():
     try:
         owner = Web3.to_checksum_address(request.form["owner"].strip())
         tokens = fetch_my_tokens(CONTRACT_ADDRESS, owner)
-        if not tokens:
-            return jsonify({"success": False, "error": "No tokens owned"}), 400
+        points = len(tokens) * 10  # 10 points per token
 
-        now = datetime.now(timezone.utc)
-        points = 0
+        # **New: Check last claimed time for this address**
+        result = supabase.table("points").select("last_claimed").eq("address", owner.lower()).execute()
+        if result.data and len(result.data) > 0:
+            last_claimed_str = result.data[0].get("last_claimed")
+            if last_claimed_str:
+                # Parse the timestamp (assumes ISO format from Supabase)
+                if last_claimed_str.endswith("Z"):  # Replace 'Z' with '+00:00' if needed for ISO format
+                    last_claimed_str = last_claimed_str[:-1] + "+00:00"
+                last_claimed = datetime.fromisoformat(last_claimed_str)
+                now = datetime.now(timezone.utc)
+                # If less than 24 hours since last claim, reject the request
+                if now - last_claimed < timedelta(hours=24):
+                    return jsonify({"success": False, "error": "Wait Sketchy"}), 400
 
-        # Check each token's last claim time
-        for token_id in tokens:
-            result = supabase.table("token_claims").select("last_claimed").eq("token_id", token_id).execute()
-            if result.data and len(result.data) > 0:
-                last_claimed_str = result.data[0].get("last_claimed")
-                if last_claimed_str:
-                    if last_claimed_str.endswith("Z"):
-                        last_claimed_str = last_claimed_str[:-1] + "+00:00"
-                    last_claimed = datetime.fromisoformat(last_claimed_str)
-                    if now - last_claimed < timedelta(hours=24):
-                        return jsonify({"success": False, "error": f"Token {token_id} claimed recently. Wait 24 hours."}), 400
-            points += 10  # 10 points per eligible token
+        # **New: Update last_claimed to now and upsert points**
+        current_time = datetime.now(timezone.utc).isoformat()  # current timestamp in ISO format
+        data = {"address": owner.lower(), "points": points, "last_claimed": current_time}
+        result = supabase.table("points").upsert(data).execute()
 
-        # Update token_claims for each token
-        for token_id in tokens:
-            data = {
-                "token_id": token_id,
-                "last_claimed": now.isoformat(),
-                "address": owner.lower()
-            }
-            supabase.table("token_claims").upsert(data).execute()
-
-        # Update user's points (use 'point' column to match existing table)
-        result = supabase.table("points").select("point").eq("address", owner.lower()).execute()
-        current_points = result.data[0]["point"] if result.data else 0
-        new_points = current_points + points
-        points_data = {
-            "address": owner.lower(),
-            "point": new_points,
-            "last_claimed": now.isoformat()
-        }
-        supabase.table("points").upsert(points_data).execute()
-
-        return jsonify({"success": True, "points": points, "error": None})
+        if result.data:
+            return jsonify({"success": True, "points": points, "error": None})
+        else:
+            return jsonify({"success": False, "error": "Failed to save points"}), 500
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 400
 
