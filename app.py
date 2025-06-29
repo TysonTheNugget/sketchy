@@ -1,6 +1,6 @@
 from flask import Flask, render_template, request, jsonify
 from flask_cors import CORS
-from flask_wtf.csrf import CSRFProtect, generate_csrf
+from flask_wtf.csrf import CSRFProtect, validate_csrf, CSRFError
 from web3 import Web3
 import os
 from supabase import create_client, Client
@@ -129,9 +129,17 @@ def get_tokens():
         return jsonify({"tokens": None, "error": str(e)}), 400
 
 @app.route("/api/claim_points", methods=["POST"])
-@csrf.required  # Require CSRF token
 def claim_points():
     try:
+        # Manually validate CSRF token
+        csrf_token = request.headers.get('X-CSRF-Token') or request.form.get('csrf_token')
+        if not csrf_token:
+            return jsonify({"success": False, "error": "Missing CSRF token"}), 403
+        try:
+            validate_csrf(csrf_token)
+        except CSRFError as e:
+            return jsonify({"success": False, "error": f"Invalid CSRF token: {str(e)}"}), 403
+
         owner = validate_address(request.form.get("owner", "").strip())
         tokens = fetch_my_tokens(CONTRACT_ADDRESS, owner)
         points = len(tokens) * 10  # 10 points per token
