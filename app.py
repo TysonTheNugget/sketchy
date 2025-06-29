@@ -2,57 +2,6 @@ from flask import Flask, render_template, request, jsonify
 from flask_cors import CORS
 from web3 import Web3
 import os
-from supper import create_client `
-
-app = Flask(__name__)
-CORS(app, resources={r"/api/*": {"origins": ["https://www.mymilio.xyz", "http://localhost:3000"]}})
-
-# —— CONFIG ——
-RPC_URL = os.getenv("RPC_URL", "https://api.mainnet.abs.xyz")
-w3 = Web3(Web3.HTTPProvider(RPC_URL))
-if not w3.is_connected():
-    raise RuntimeError("❌ Could not connect to Abstract RPC")
-
-# Supabase setup
-SUPABASE_URL = os.getenv("SUPABASE_URL", "https://vkxchgckwyqnxlmirqqu.supabase.co")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY", "<Your Supabase Service Key>")
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-
-# SketchyMilio contract
-CONTRACT_ADDRESS = Web3.to_checksum_address("0x08533A2b16e3db03eeBD5b23210122f97dfcb97d")
-
-# Event signatures
-TRANSFER_SIG = w3.keccak(text="Transfer(address,address,uint256)").hex()
-CONS_SIG = w3.keccak(text="ConsecutiveTransfer(uint256,uint256,address,address)").hex()
-
-# Minimal ERC-721 Enumerable ABI
-ERC721_ENUM_ABI = [
-    {"constant": True, "inputs": [{"name": "_owner", "type": "address"}],
-     "name": "balanceOf", "outputs": [{"name": "", "type": "uint256"}], "type": "function"},
-    {"constant": True, "inputs": [{"name": "_owner", "type": "address"}, {"name": "_index", "type": "uint256"}],
-     "name": "tokenOfOwnerByIndex", "outputs": [{"name": "", "type": "uint256"}], "type": "function"}
-]
-
-def fetch_via_enumeration(c_addr, owner):
-    c = w3.eth.contract(address=c_addr, abi=ERC721_ENUM_ABI)
-    bal = c.functions.balanceOf(owner).call()
-    return [c.functions.tokenOfOwnerByIndex(owner, i).call() for i in range(bal)]
-
-def fetch_via_logs(c_addr, owner, start_block=0, chunk=200_000):
-    owner_lc = owner.lower()
-    latest = w3.eth.block_number
-    myset = set()
-
-    for frm in range(start_block
-
-System: I noticed an issue in the code you provided: there's a typo in the import statement for Supabase (`from supper import create_client`) and the `fetch_via_logs` function is cut off. I'll fix these issues and provide the complete, corrected Flask code, ensuring it works with your Supabase setup (table `points` with columns `address`, `point`, `last_claimed`, and `token_claims` table) to prevent users from bypassing the 24-hour claim limit by moving tokens. The `/api/claim_points` endpoint will use the `point` column and include token-based tracking.
-
-### Full Corrected Code
-```python
-from flask import Flask, render_template, request, jsonify
-from flask_cors import CORS
-from web3 import Web3
-import os
 from supabase import create_client, Client
 from datetime import datetime, timedelta, timezone
 
