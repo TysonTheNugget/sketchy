@@ -17,7 +17,7 @@ CORS(app, resources={r"/api/*": {
     "supports_credentials": True
 }})  # Only production origin with credentials
 csrf = CSRFProtect(app)  # CSRF protection
-limiter = Limiter(app, key_func=get_remote_address, default_limits=["200 per day", "50 per hour"])  # Use key_func for compatibility
+limiter = Limiter(app, get_remote_address, default_limits=["200 per day", "50 per hour"])  # Positional key_func for older versions
 
 # —— CONFIG ——  
 RPC_URL = os.getenv("RPC_URL", "https://api.mainnet.abs.xyz")
