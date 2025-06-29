@@ -4,19 +4,25 @@ from web3 import Web3
 import os
 from supabase import create_client, Client
 from datetime import datetime, timedelta
+import logging
 
 app = Flask(__name__)
 CORS(app, resources={r"/api/*": {"origins": ["https://www.mymilio.xyz", "http://localhost:3000"]}})
+
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # —— CONFIG ——  
 RPC_URL = os.getenv("RPC_URL", "https://api.mainnet.abs.xyz")
 w3 = Web3(Web3.HTTPProvider(RPC_URL))
 if not w3.is_connected():
+    logger.error("Failed to connect to Abstract RPC")
     raise RuntimeError("❌ Could not connect to Abstract RPC")
 
 # Supabase setup
 SUPABASE_URL = os.getenv("SUPABASE_URL", "https://vkxchgckwyqnxlmirqqu.supabase.co")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZreGNoZ2Nrd3lxbnhsbWlycXF1Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc1MTE1MzAwOCwiZXhwIjoyMDY2NzI5MDA4fQ.3L5JOHUPlx3O4toJ4amC9fiHc-vDmItCZ57DnGNvW70")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # SketchyMilio contract
@@ -39,7 +45,7 @@ def fetch_via_enumeration(c_addr, owner):
     bal = c.functions.balanceOf(owner).call()
     return [c.functions.tokenOfOwnerByIndex(owner, i).call() for i in range(bal)]
 
-def fetch_via_logs(c_addr, owner, start_block=0, chunk=200_000):
+def fetch_via_logs(c_addr, owner, start_block=0, chunk=100_000):
     owner_lc = owner.lower()
     latest = w3.eth.block_number
     myset = set()
@@ -77,7 +83,8 @@ def fetch_via_logs(c_addr, owner, start_block=0, chunk=200_000):
 def fetch_my_tokens(c_addr, owner):
     try:
         return fetch_via_enumeration(c_addr, owner)
-    except Exception:
+    except Exception as e:
+        logger.warning(f"Enumeration failed: {e}. Falling back to logs.")
         return fetch_via_logs(c_addr, owner)
 
 @app.route("/", methods=["GET", "POST"])
@@ -91,6 +98,7 @@ def index():
             o = Web3.to_checksum_address(raw_o)
             user_toks = fetch_my_tokens(CONTRACT_ADDRESS, o)
         except Exception as e:
+            logger.error(f"Error fetching tokens: {e}")
             error = f"🚨 {e}"
 
     return render_template("index.html",
@@ -102,42 +110,44 @@ def get_tokens():
     try:
         owner = Web3.to_checksum_address(request.form["owner"].strip())
         tokens = fetch_my_tokens(CONTRACT_ADDRESS, owner)
+        logger.info(f"Fetched {len(tokens)} tokens for address {owner}")
         return jsonify({"tokens": tokens, "error": None})
     except Exception as e:
+        logger.error(f"Error in get_tokens: {e}")
         return jsonify({"tokens": None, "error": str(e)}), 400
 
 @app.route("/api/claim_points", methods=["POST"])
 def claim_points():
     try:
         owner = Web3.to_checksum_address(request.form["owner"].strip())
+        logger.info(f"Processing claim for address {owner}")
 
         # Fetch all tokens owned
         tokens = fetch_my_tokens(CONTRACT_ADDRESS, owner)
         if not tokens:
+            logger.warning(f"No tokens owned by {owner}")
             return jsonify({"success": False, "error": "No tokens owned"}), 400
 
         # Validate token IDs (ensure they are between 1 and 4269)
         tokens = [t for t in tokens if 1 <= t <= 4269]
         if not tokens:
+            logger.warning(f"No valid tokens (1-4269) owned by {owner}")
             return jsonify({"success": False, "error": "No valid tokens (1-4269) owned"}), 400
 
         # Check last claim time for each token
         claimable_tokens = []
+        claimed_tokens = supabase.table("token_claims").select("token_id, claimed_at").in_("token_id", tokens).execute()
+        claimed_dict = {row["token_id"]: datetime.fromisoformat(row["claimed_at"].replace("Z", "+00:00")) for row in claimed_tokens.data}
+
         for token in tokens:
-            last_claim = supabase.table("token_claims")\
-                .select("claimed_at")\
-                .eq("token_id", token)\
-                .order("claimed_at", desc=True)\
-                .limit(1)\
-                .execute()
-            
-            if not last_claim.data or \
-               datetime.fromisoformat(last_claim.data[0]["claimed_at"].replace("Z", "+00:00")) + timedelta(hours=24) <= datetime.now().astimezone():
+            last_claim_time = claimed_dict.get(token)
+            if not last_claim_time or last_claim_time + timedelta(hours=24) <= datetime.now().astimezone():
                 claimable_tokens.append(token)
 
         # Calculate points for claimable tokens
         points = len(claimable_tokens) * 10  # 10 points per claimable token
         if points == 0:
+            logger.warning(f"All tokens on cooldown for {owner}")
             return jsonify({"success": False, "error": "All owned tokens are on 24-hour cooldown"}), 429
 
         # Update points in points table
@@ -149,17 +159,27 @@ def claim_points():
             "address": owner.lower(),
             "points": new_points
         }).execute()
+        logger.info(f"Updated points for {owner}: {new_points}")
 
-        # Record new claims
-        for token in claimable_tokens:
-            supabase.table("token_claims").insert({
+        # Batch upsert claims
+        claim_data = [
+            {
                 "token_id": token,
                 "address": owner.lower(),
                 "claimed_at": datetime.now().astimezone().isoformat()
-            }).execute()
+            } for token in claimable_tokens
+        ]
+        try:
+            if claim_data:
+                supabase.table("token_claims").upsert(claim_data).execute()
+                logger.info(f"Upserted {len(claim_data)} claims for {owner}")
+        except Exception as e:
+            logger.error(f"Failed to upsert claims for {owner}: {e}")
+            return jsonify({"success": False, "error": f"Failed to save claims: {str(e)}"}), 500
 
         return jsonify({"success": True, "points": points, "total_points": new_points, "error": None})
     except Exception as e:
+        logger.error(f"Error in claim_points: {e}")
         return jsonify({"success": False, "error": str(e)}), 400
 
 if __name__ == "__main__":
