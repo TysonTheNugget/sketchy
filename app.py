@@ -1,11 +1,23 @@
 from flask import Flask, render_template, request, jsonify
 from flask_cors import CORS
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
+from flask_wtf.csrf import CSRFProtect, generate_csrf
 from web3 import Web3
 import os
 from supabase import create_client, Client
+import re
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 app = Flask(__name__)
-CORS(app, resources={r"/api/*": {"origins": ["https://www.mymilio.xyz", "http://localhost:3000"]}})  # Allow frontend and local dev
+app.config['SECRET_KEY'] = os.getenv('FLASK_SECRET_KEY', os.urandom(32))  # Secure random key
+CORS(app, resources={r"/api/*": {
+    "origins": ["https://www.mymilio.xyz"],
+    "supports_credentials": True
+}})  # Only production origin with credentials
+csrf = CSRFProtect(app)  # CSRF protection
+limiter = Limiter(app, key_func=get_remote_address, default_limits=["200 per day", "50 per hour"])  # Global rate limit
 
 # —— CONFIG ——  
 RPC_URL = os.getenv("RPC_URL", "https://api.mainnet.abs.xyz")
@@ -14,8 +26,10 @@ if not w3.is_connected():
     raise RuntimeError("❌ Could not connect to Abstract RPC")
 
 # Supabase setup
-SUPABASE_URL = os.getenv("SUPABASE_URL", "https://vkxchgckwyqnxlmirqqu.supabase.co")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZreGNoZ2Nrd3lxbnhsbWlycXF1Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc1MTE1MzAwOCwiZXhwIjoyMDY2NzI5MDA4fQ.3L5JOHUPlx3O4toJ4amC9fiHc-vDmItCZ57DnGNvW70")
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+if not SUPABASE_URL or not SUPABASE_KEY:
+    raise RuntimeError("❌ Supabase URL or Key missing")
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # SketchyMilio contract
@@ -79,41 +93,77 @@ def fetch_my_tokens(c_addr, owner):
     except Exception:
         return fetch_via_logs(c_addr, owner)
 
+def validate_address(address):
+    """Validate Ethereum address format."""
+    if not re.match(r'^0x[a-fA-F0-9]{40}$', address):
+        raise ValueError("Invalid Ethereum address format")
+    return Web3.to_checksum_address(address)
+
+@app.route("/api/csrf-token", methods=["GET"])
+def get_csrf_token():
+    """Return CSRF token for frontend."""
+    return jsonify({"csrf_token": generate_csrf()})
+
 @app.route("/", methods=["GET", "POST"])
 def index():
     error = None
     user_toks = None
 
     if request.method == "POST":
-        raw_o = request.form["owner"].strip()
+        raw_o = request.form.get("owner", "").strip()
         try:
-            o = Web3.to_checksum_address(raw_o)
+            o = validate_address(raw_o)
             user_toks = fetch_my_tokens(CONTRACT_ADDRESS, o)
         except Exception as e:
-            error = f"🚨 {e}"
+            error = f"🚨 {str(e)}"
 
     return render_template("index.html",
                            error=error,
                            user_toks=user_toks)
 
 @app.route("/api/tokens", methods=["POST"])
+@csrf.exempt  # Exempt if index.html still uses this
+@limiter.limit("10 per minute")  # 10 requests per minute per IP
 def get_tokens():
     try:
-        owner = Web3.to_checksum_address(request.form["owner"].strip())
+        owner = validate_address(request.form.get("owner", "").strip())
         tokens = fetch_my_tokens(CONTRACT_ADDRESS, owner)
         return jsonify({"tokens": tokens, "error": None})
     except Exception as e:
         return jsonify({"tokens": None, "error": str(e)}), 400
 
 @app.route("/api/claim_points", methods=["POST"])
+@csrf.required  # Require CSRF token
+@limiter.limit("5 per minute")  # Stricter for points claiming
 def claim_points():
     try:
-        owner = Web3.to_checksum_address(request.form["owner"].strip())
+        owner = validate_address(request.form.get("owner", "").strip())
         tokens = fetch_my_tokens(CONTRACT_ADDRESS, owner)
         points = len(tokens) * 10  # 10 points per token
 
-        # Upsert points in Supabase
-        data = {"address": owner.lower(), "points": points}
+        # Check last claim time
+        result = supabase.table("points").select("last_claimed").eq("address", owner.lower()).execute()
+        now = datetime.now(ZoneInfo("UTC"))
+
+        if result.data:
+            last_claimed = result.data[0]["last_claimed"]
+            if last_claimed:
+                last_claimed_time = datetime.fromisoformat(last_claimed.replace("Z", "+00:00"))
+                if now - last_claimed_time < timedelta(hours=24):
+                    time_left = timedelta(hours=24) - (now - last_claimed_time)
+                    hours, remainder = divmod(time_left.seconds, 3600)
+                    minutes = remainder // 60
+                    return jsonify({
+                        "success": False,
+                        "error": f"Address already claimed within 24 hours. Try again in {hours}h {minutes}m"
+                    }), 429
+
+        # Upsert points and update last_claimed
+        data = {
+            "address": owner.lower(),
+            "points": points,
+            "last_claimed": now.isoformat()
+        }
         result = supabase.table("points").upsert(data).execute()
 
         if result.data:
@@ -124,4 +174,4 @@ def claim_points():
         return jsonify({"success": False, "error": str(e)}), 400
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    app.run()  # No debug in production
