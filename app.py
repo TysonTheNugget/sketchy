@@ -5,6 +5,7 @@ import os
 from supabase import create_client, Client
 from datetime import datetime, timedelta
 import logging
+import requests
 
 app = Flask(__name__)
 CORS(app, resources={r"/api/*": {"origins": ["https://www.mymilio.xyz", "http://localhost:3000"]}})
@@ -39,6 +40,28 @@ ERC721_ENUM_ABI = [
     {"constant": True, "inputs": [{"name": "_owner", "type": "address"}, {"name": "_index", "type": "uint256"}],
      "name": "tokenOfOwnerByIndex", "outputs": [{"name": "", "type": "uint256"}], "type": "function"}
 ]
+
+# JSONBin.io configuration
+PRIMARY_BIN_ID = "6866db818960c979a5b69ec5"
+BACKUP_BIN_ID = "6866db758a456b7966badaf8"
+JSONBIN_API_URL = "https://api.jsonbin.io/v3/b"
+JSONBIN_API_KEY = "$2a$10$dp8mW6bTyf/aNXVEXi61n.QiAuBiEIAxcHwjBKceZvD5l8zi7B0HS"  # Replace with env var in production
+
+def post_to_jsonbin(bin_id, data):
+    """Post JSON data to a JSONBin.io bin."""
+    try:
+        headers = {
+            "Content-Type": "application/json",
+            "X-Master-Key": JSONBIN_API_KEY
+        }
+        url = f"{JSONBIN_API_URL}/{bin_id}"
+        response = requests.put(url, json=data, headers=headers, timeout=10)
+        response.raise_for_status()
+        logger.info(f"Successfully posted leaderboard to JSONBin.io bin {bin_id}")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to post to JSONBin.io bin {bin_id}: {e}")
+        return False
 
 def fetch_via_enumeration(c_addr, owner):
     c = w3.eth.contract(address=c_addr, abi=ERC721_ENUM_ABI)
@@ -101,6 +124,8 @@ def index():
             logger.error(f"Error fetching tokens: {e}")
             error = f"🚨 {e}"
 
+ежду
+
     return render_template("index.html",
                            error=error,
                            user_toks=user_toks)
@@ -150,7 +175,7 @@ def claim_points():
             logger.warning(f"All tokens on cooldown for {owner}")
             return jsonify({"success": False, "error": "All owned tokens are on 24-hour cooldown"}), 429
 
-        # Update points in points table
+<is_empty>        # Update points in points table
         current_points_result = supabase.table("points").select("points").eq("address", owner.lower()).execute()
         current_points = current_points_result.data[0]["points"] if current_points_result.data else 0
         new_points = current_points + points
@@ -192,6 +217,13 @@ def get_leaderboard():
             for row in result.data
         ]
         logger.info(f"Fetched leaderboard with {len(leaderboard_data)} entries")
+
+        # Save leaderboard data to JSONBin.io
+        save_status = post_to_jsonbin(PRIMARY_BIN_ID, leaderboard_data)
+        if not save_status:
+            logger.warning(f"Primary bin {PRIMARY_BIN_ID} failed, trying backup bin {BACKUP_BIN_ID}")
+            save_status = post_to_jsonbin(BACKUP_BIN_ID, leaderboard_data)
+
         return jsonify({"leaderboard": leaderboard_data, "error": None})
     except Exception as e:
         logger.error(f"Error in get_leaderboard: {e}")
