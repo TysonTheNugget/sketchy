@@ -45,7 +45,7 @@ ERC721_ENUM_ABI = [
 PRIMARY_BIN_ID = "6866db818960c979a5b69ec5"
 BACKUP_BIN_ID = "6866db758a456b7966badaf8"
 JSONBIN_API_URL = "https://api.jsonbin.io/v3/b"
-JSONBIN_API_KEY = "$2a$10$dp8mW6bTyf/aNXVEXi61n.QiAuBiEIAxcHwjBKceZvD5l8zi7B0HS"  # Replace with env var in production
+JSONBIN_API_KEY = os.getenv("JSONBIN_API_KEY", "$2a$10$dp8mW6bTyf/aNXVEXi61n.QiAuBiEIAxcHwjBKceZvD5l8zi7B0HS")
 
 def post_to_jsonbin(bin_id, data):
     """Post JSON data to a JSONBin.io bin."""
@@ -124,11 +124,9 @@ def index():
             logger.error(f"Error fetching tokens: {e}")
             error = f"🚨 {e}"
 
-ежду
-
     return render_template("index.html",
-                           error=error,
-                           user_toks=user_toks)
+                          error=error,
+                          user_toks=user_toks)
 
 @app.route("/api/tokens", methods=["POST"])
 def get_tokens():
@@ -175,7 +173,7 @@ def claim_points():
             logger.warning(f"All tokens on cooldown for {owner}")
             return jsonify({"success": False, "error": "All owned tokens are on 24-hour cooldown"}), 429
 
-<is_empty>        # Update points in points table
+        # Update points in points table
         current_points_result = supabase.table("points").select("points").eq("address", owner.lower()).execute()
         current_points = current_points_result.data[0]["points"] if current_points_result.data else 0
         new_points = current_points + points
