@@ -4,6 +4,7 @@ from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from web3 import Web3
 from web3.exceptions import ContractLogicError
+from flask_hcaptcha import hCaptcha
 import os
 from supabase import create_client, Client
 from datetime import datetime, timedelta
@@ -18,6 +19,12 @@ CORS(app, resources={
         "supports_credentials": True
     }
 })
+
+# hCaptcha configuration
+app.config['HCAPTCHA_ENABLED'] = True
+app.config['HCAPTCHA_SITE_KEY'] = 'your-site-key'
+app.config['HCAPTCHA_SECRET_KEY'] = 'your-secret-key'
+hcaptcha = hCaptcha(app)
 
 # Rate limiting to prevent API abuse
 limiter = Limiter(
@@ -163,9 +170,12 @@ def index():
 
 @app.route("/api/tokens", methods=["POST", "OPTIONS"])
 @limiter.limit("10 per minute")
+@hcaptcha.required
 def get_tokens():
     if request.method == "OPTIONS":
         return '', 204
+    if not hcaptcha.verify():
+        return jsonify({"tokens": [], "error": "CAPTCHA verification failed"}), 400
     try:
         owner = request.form.get("owner", "").strip()
         if not is_valid_address(owner):
@@ -180,9 +190,12 @@ def get_tokens():
 
 @app.route("/api/claim_points", methods=["POST", "OPTIONS"])
 @limiter.limit("5 per minute")
+@hcaptcha.required
 def claim_points():
     if request.method == "OPTIONS":
         return '', 204
+    if not hcaptcha.verify():
+        return jsonify({"success": False, "error": "CAPTCHA verification failed"}), 400
     try:
         owner = request.form.get("owner", "").strip()
         if not is_valid_address(owner):
@@ -226,6 +239,10 @@ def claim_points():
     except Exception as e:
         logger.error(f"Error in claim_points: {e}")
         return jsonify({"success": False, "error": str(e)}), 400
+
+@app.route('/robots.txt')
+def robots():
+    return send_from_directory(app.static_folder, 'robots.txt')
 
 @app.route("/api/leaderboard", methods=["GET", "OPTIONS"])
 @limiter.limit("20 per minute")
