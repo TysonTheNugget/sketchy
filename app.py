@@ -1,6 +1,7 @@
 from flask import Flask, render_template, request, jsonify
 from flask_cors import CORS
 from web3 import Web3
+from web3.exceptions import ContractLogicError
 import os
 from supabase import create_client, Client
 from datetime import datetime, timedelta
@@ -45,23 +46,27 @@ def fetch_via_enumeration(c_addr, owner):
     bal = c.functions.balanceOf(owner).call()
     return [c.functions.tokenOfOwnerByIndex(owner, i).call() for i in range(bal)]
 
-def fetch_via_logs(c_addr, owner, start_block=0, chunk=100_000):
+def fetch_via_logs(c_addr, owner, start_block=0, chunk=50_000):
     owner_lc = owner.lower()
     latest = w3.eth.block_number
     myset = set()
 
-    for frm in range(start_block, latest+1, chunk):
-        to = min(frm+chunk-1, latest)
-        logs = w3.eth.get_logs({
-            "fromBlock": frm, "toBlock": to,
-            "address": c_addr, "topics": [None]
-        })
+    for frm in range(start_block, latest + 1, chunk):
+        to = min(frm + chunk - 1, latest)
+        try:
+            logs = w3.eth.get_logs({
+                "fromBlock": frm, "toBlock": to,
+                "address": c_addr, "topics": [None]
+            })
+        except ContractLogicError as e:
+            logger.warning(f"get_logs reverted for blocks {frm}-{to}: {e}")
+            continue
 
         for ev in logs:
             sig = ev["topics"][0].hex()
             if sig == TRANSFER_SIG:
-                frm_a = "0x"+ev["topics"][1].hex()[-40:]
-                to_a = "0x"+ev["topics"][2].hex()[-40:]
+                frm_a = Web3.to_checksum_address("0x" + ev["topics"][1].hex()[-40:])
+                to_a = Web3.to_checksum_address("0x" + ev["topics"][2].hex()[-40:])
                 tid = int.from_bytes(ev["topics"][3], "big")
                 if to_a.lower() == owner_lc:
                     myset.add(tid)
@@ -70,12 +75,12 @@ def fetch_via_logs(c_addr, owner, start_block=0, chunk=100_000):
             elif sig == CONS_SIG:
                 ft = int(ev["topics"][1].hex(), 16)
                 tt = int(ev["topics"][2].hex(), 16)
-                fa = "0x"+ev["topics"][3].hex()[-40:]
-                ta = "0x"+ev["data"].hex()[-40:]
+                fa = Web3.to_checksum_address("0x" + ev["topics"][3].hex()[-40:])
+                ta = Web3.to_checksum_address("0x" + ev["data"].hex()[-40:])
                 if ta.lower() == owner_lc:
-                    myset.update(range(ft, tt+1))
+                    myset.update(range(ft, tt + 1))
                 if fa.lower() == owner_lc:
-                    for x in range(ft, tt+1):
+                    for x in range(ft, tt + 1):
                         myset.discard(x)
 
     return sorted(myset)
@@ -93,7 +98,7 @@ def index():
     user_toks = None
 
     if request.method == "POST":
-        raw_o = request.form["owner"].strip()
+        raw_o = request.form.get("owner", "").strip()
         try:
             o = Web3.to_checksum_address(raw_o)
             user_toks = fetch_my_tokens(CONTRACT_ADDRESS, o)
@@ -101,83 +106,60 @@ def index():
             logger.error(f"Error fetching tokens: {e}")
             error = f"🚨 {e}"
 
-    return render_template("index.html",
-                           error=error,
-                           user_toks=user_toks)
+    return render_template("index.html", error=error, user_toks=user_toks)
 
-@app.route("/api/tokens", methods=["POST"])
+@app.route("/api/tokens", methods=["GET", "POST"])
 def get_tokens():
     try:
-        owner = Web3.to_checksum_address(request.form["owner"].strip())
+        raw = request.args.get("owner") if request.method == "GET" else request.form.get("owner")
+        owner = Web3.to_checksum_address(raw.strip())
         tokens = fetch_my_tokens(CONTRACT_ADDRESS, owner)
         logger.info(f"Fetched {len(tokens)} tokens for address {owner}")
         return jsonify({"tokens": tokens, "error": None})
     except Exception as e:
         logger.error(f"Error in get_tokens: {e}")
-        return jsonify({"tokens": None, "error": str(e)}), 400
+        # Return empty array instead of 400 to avoid front-end crashes
+        return jsonify({"tokens": [], "error": str(e)})
 
 @app.route("/api/claim_points", methods=["POST"])
 def claim_points():
     try:
-        owner = Web3.to_checksum_address(request.form["owner"].strip())
+        owner = Web3.to_checksum_address(request.form.get("owner", "").strip())
         logger.info(f"Processing claim for address {owner}")
 
-        # Fetch all tokens owned
         tokens = fetch_my_tokens(CONTRACT_ADDRESS, owner)
         if not tokens:
-            logger.warning(f"No tokens owned by {owner}")
             return jsonify({"success": False, "error": "No tokens owned"}), 400
 
-        # Validate token IDs (ensure they are between 1 and 4269)
         tokens = [t for t in tokens if 1 <= t <= 4269]
         if not tokens:
-            logger.warning(f"No valid tokens (1-4269) owned by {owner}")
             return jsonify({"success": False, "error": "No valid tokens (1-4269) owned"}), 400
 
-        # Check last claim time for each token
         claimable_tokens = []
-        claimed_tokens = supabase.table("token_claims").select("token_id, claimed_at").in_("token_id", tokens).execute()
-        claimed_dict = {row["token_id"]: datetime.fromisoformat(row["claimed_at"].replace("Z", "+00:00")) for row in claimed_tokens.data}
+        claimed = supabase.table("token_claims").select("token_id, claimed_at").in_("token_id", tokens).execute()
+        claimed_dict = {row["token_id"]: datetime.fromisoformat(row["claimed_at"].replace("Z", "+00:00")) for row in claimed.data}
 
         for token in tokens:
-            last_claim_time = claimed_dict.get(token)
-            if not last_claim_time or last_claim_time + timedelta(hours=24) <= datetime.now().astimezone():
+            last = claimed_dict.get(token)
+            if not last or last + timedelta(hours=24) <= datetime.now().astimezone():
                 claimable_tokens.append(token)
 
-        # Calculate points for claimable tokens
-        points = len(claimable_tokens) * 10  # 10 points per claimable token
+        points = len(claimable_tokens) * 10
         if points == 0:
-            logger.warning(f"All tokens on cooldown for {owner}")
             return jsonify({"success": False, "error": "All owned tokens are on 24-hour cooldown"}), 429
 
-        # Update points in points table
-        current_points_result = supabase.table("points").select("points").eq("address", owner.lower()).execute()
-        current_points = current_points_result.data[0]["points"] if current_points_result.data else 0
-        new_points = current_points + points
+        current = supabase.table("points").select("points").eq("address", owner.lower()).execute()
+        curr_pts = current.data[0]["points"] if current.data else 0
+        new_pts = curr_pts + points
 
-        supabase.table("points").upsert({
-            "address": owner.lower(),
-            "points": new_points
-        }).execute()
-        logger.info(f"Updated points for {owner}: {new_points}")
+        supabase.table("points").upsert({"address": owner.lower(), "points": new_pts}).execute()
+        
+        now_iso = datetime.now().astimezone().isoformat()
+        claim_data = [{"token_id": t, "address": owner.lower(), "claimed_at": now_iso} for t in claimable_tokens]
+        if claim_data:
+            supabase.table("token_claims").upsert(claim_data).execute()
 
-        # Batch upsert claims
-        claim_data = [
-            {
-                "token_id": token,
-                "address": owner.lower(),
-                "claimed_at": datetime.now().astimezone().isoformat()
-            } for token in claimable_tokens
-        ]
-        try:
-            if claim_data:
-                supabase.table("token_claims").upsert(claim_data).execute()
-                logger.info(f"Upserted {len(claim_data)} claims for {owner}")
-        except Exception as e:
-            logger.error(f"Failed to upsert claims for {owner}: {e}")
-            return jsonify({"success": False, "error": f"Failed to save claims: {str(e)}"}), 500
-
-        return jsonify({"success": True, "points": points, "total_points": new_points, "error": None})
+        return jsonify({"success": True, "points": points, "total_points": new_pts, "error": None})
     except Exception as e:
         logger.error(f"Error in claim_points: {e}")
         return jsonify({"success": False, "error": str(e)}), 400
@@ -185,14 +167,9 @@ def claim_points():
 @app.route("/api/leaderboard", methods=["GET"])
 def get_leaderboard():
     try:
-        # Query the points table, sort by points in descending order, limit to 100
         result = supabase.table("points").select("address, points").order("points", desc=True).limit(100).execute()
-        leaderboard_data = [
-            {"wallet": row["address"], "points": row["points"]}
-            for row in result.data
-        ]
-        logger.info(f"Fetched leaderboard with {len(leaderboard_data)} entries")
-        return jsonify({"leaderboard": leaderboard_data, "error": None})
+        lb = [{"wallet": r["address"], "points": r["points"]} for r in result.data]
+        return jsonify({"leaderboard": lb, "error": None})
     except Exception as e:
         logger.error(f"Error in get_leaderboard: {e}")
         return jsonify({"leaderboard": [], "error": str(e)}), 500
