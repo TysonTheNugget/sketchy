@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request, jsonify
+from flask import Flask, render_template, request, jsonify, send_from_directory
 from flask_cors import CORS
 from web3 import Web3
 from web3.exceptions import ContractLogicError
@@ -7,33 +7,35 @@ from supabase import create_client, Client
 from datetime import datetime, timedelta
 import logging
 
-app = Flask(__name__)
-CORS(app, resources={r"/api/*": {"origins": ["https://www.mymilio.xyz", "http://localhost:3000"]}})
+app = Flask(__name__, static_folder="static")
+# Allow exactly your deployed origin (and localhost for dev) on ALL /api/* routes, including OPTIONS
+CORS(app,
+     resources={r"/api/*": {"origins": ["https://www.mymilio.xyz", "http://localhost:3000"]}},
+     supports_credentials=True)
 
-# Set up logging
+# serve a favicon.ico (put one under ./static/favicon.ico)
+@app.route("/favicon.ico")
+def favicon():
+    return send_from_directory(app.static_folder, "favicon.ico")
+
+# ——— CONFIG ———
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# —— CONFIG ——  
 RPC_URL = os.getenv("RPC_URL", "https://api.mainnet.abs.xyz")
 w3 = Web3(Web3.HTTPProvider(RPC_URL))
 if not w3.is_connected():
     logger.error("Failed to connect to Abstract RPC")
     raise RuntimeError("❌ Could not connect to Abstract RPC")
 
-# Supabase setup
 SUPABASE_URL = os.getenv("SUPABASE_URL", "https://vkxchgckwyqnxlmirqqu.supabase.co")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# SketchyMilio contract
 CONTRACT_ADDRESS = Web3.to_checksum_address("0x08533A2b16e3db03eeBD5b23210122f97dfcb97d")
-
-# Event signatures
 TRANSFER_SIG = w3.keccak(text="Transfer(address,address,uint256)").hex()
-CONS_SIG = w3.keccak(text="ConsecutiveTransfer(uint256,uint256,address,address)").hex()
+CONS_SIG     = w3.keccak(text="ConsecutiveTransfer(uint256,uint256,address,address)").hex()
 
-# Minimal ERC-721 Enumerable ABI
 ERC721_ENUM_ABI = [
     {"constant": True, "inputs": [{"name": "_owner", "type": "address"}],
      "name": "balanceOf", "outputs": [{"name": "", "type": "uint256"}], "type": "function"},
@@ -46,7 +48,7 @@ def fetch_via_enumeration(c_addr, owner):
     bal = c.functions.balanceOf(owner).call()
     return [c.functions.tokenOfOwnerByIndex(owner, i).call() for i in range(bal)]
 
-def fetch_via_logs(c_addr, owner, start_block=0, chunk=50_000):
+def fetch_via_logs(c_addr, owner, start_block=0, chunk=100_000):
     owner_lc = owner.lower()
     latest = w3.eth.block_number
     myset = set()
@@ -59,24 +61,26 @@ def fetch_via_logs(c_addr, owner, start_block=0, chunk=50_000):
                 "address": c_addr, "topics": [None]
             })
         except ContractLogicError as e:
-            logger.warning(f"get_logs reverted for blocks {frm}-{to}: {e}")
+            logger.warning(f"get_logs reverted on blocks {frm}-{to}: {e}")
             continue
 
         for ev in logs:
             sig = ev["topics"][0].hex()
             if sig == TRANSFER_SIG:
-                frm_a = Web3.to_checksum_address("0x" + ev["topics"][1].hex()[-40:])
-                to_a = Web3.to_checksum_address("0x" + ev["topics"][2].hex()[-40:])
-                tid = int.from_bytes(ev["topics"][3], "big")
+                frm_a = "0x" + ev["topics"][1].hex()[-40:]
+                to_a  = "0x" + ev["topics"][2].hex()[-40:]
+                tid   = int.from_bytes(ev["topics"][3], "big")
                 if to_a.lower() == owner_lc:
                     myset.add(tid)
                 if frm_a.lower() == owner_lc:
                     myset.discard(tid)
+
             elif sig == CONS_SIG:
                 ft = int(ev["topics"][1].hex(), 16)
                 tt = int(ev["topics"][2].hex(), 16)
-                fa = Web3.to_checksum_address("0x" + ev["topics"][3].hex()[-40:])
-                ta = Web3.to_checksum_address("0x" + ev["data"].hex()[-40:])
+                fa = "0x" + ev["topics"][3].hex()[-40:]
+                # consecutive uses data field for `to`
+                ta = "0x" + ev["data"].hex()[-40:]
                 if ta.lower() == owner_lc:
                     myset.update(range(ft, tt + 1))
                 if fa.lower() == owner_lc:
@@ -89,43 +93,44 @@ def fetch_my_tokens(c_addr, owner):
     try:
         return fetch_via_enumeration(c_addr, owner)
     except Exception as e:
-        logger.warning(f"Enumeration failed: {e}. Falling back to logs.")
+        logger.warning(f"Enumeration failed ({e}), falling back to logs")
         return fetch_via_logs(c_addr, owner)
 
 @app.route("/", methods=["GET", "POST"])
 def index():
     error = None
     user_toks = None
-
     if request.method == "POST":
         raw_o = request.form.get("owner", "").strip()
         try:
-            o = Web3.to_checksum_address(raw_o)
-            user_toks = fetch_my_tokens(CONTRACT_ADDRESS, o)
+            chk = Web3.to_checksum_address(raw_o)
+            user_toks = fetch_my_tokens(CONTRACT_ADDRESS, chk)
         except Exception as e:
             logger.error(f"Error fetching tokens: {e}")
             error = f"🚨 {e}"
-
     return render_template("index.html", error=error, user_toks=user_toks)
 
-@app.route("/api/tokens", methods=["GET", "POST"])
+@app.route("/api/tokens", methods=["POST"])
 def get_tokens():
+    """
+    Expects form-data: owner=<0x...>
+    Returns {"tokens": [...], "error": null} (never 404 or missing CORS)
+    """
     try:
-        raw = request.args.get("owner") if request.method == "GET" else request.form.get("owner")
-        owner = Web3.to_checksum_address(raw.strip())
-        tokens = fetch_my_tokens(CONTRACT_ADDRESS, owner)
-        logger.info(f"Fetched {len(tokens)} tokens for address {owner}")
-        return jsonify({"tokens": tokens, "error": None})
+        owner = Web3.to_checksum_address(request.form["owner"].strip())
+        toks = fetch_my_tokens(CONTRACT_ADDRESS, owner)
+        logger.info(f"Fetched {len(toks)} tokens for {owner}")
+        return jsonify({"tokens": toks, "error": None})
     except Exception as e:
         logger.error(f"Error in get_tokens: {e}")
-        # Return empty array instead of 400 to avoid front-end crashes
+        # still return 200 + empty array so CORS + JSON parse keep working
         return jsonify({"tokens": [], "error": str(e)})
 
 @app.route("/api/claim_points", methods=["POST"])
 def claim_points():
     try:
-        owner = Web3.to_checksum_address(request.form.get("owner", "").strip())
-        logger.info(f"Processing claim for address {owner}")
+        owner = Web3.to_checksum_address(request.form["owner"].strip())
+        logger.info(f"Claiming points for {owner}")
 
         tokens = fetch_my_tokens(CONTRACT_ADDRESS, owner)
         if not tokens:
@@ -133,33 +138,47 @@ def claim_points():
 
         tokens = [t for t in tokens if 1 <= t <= 4269]
         if not tokens:
-            return jsonify({"success": False, "error": "No valid tokens (1-4269) owned"}), 400
+            return jsonify({"success": False, "error": "No valid tokens (1–4269)"}), 400
 
-        claimable_tokens = []
-        claimed = supabase.table("token_claims").select("token_id, claimed_at").in_("token_id", tokens).execute()
-        claimed_dict = {row["token_id"]: datetime.fromisoformat(row["claimed_at"].replace("Z", "+00:00")) for row in claimed.data}
+        # load past claims
+        rows = supabase.table("token_claims") \
+                       .select("token_id,claimed_at") \
+                       .in_("token_id", tokens).execute().data
+        claimed_dict = {
+            r["token_id"]: datetime.fromisoformat(r["claimed_at"].replace("Z", "+00:00"))
+            for r in rows
+        }
 
-        for token in tokens:
-            last = claimed_dict.get(token)
-            if not last or last + timedelta(hours=24) <= datetime.now().astimezone():
-                claimable_tokens.append(token)
+        claimable = []
+        now = datetime.now().astimezone()
+        for t in tokens:
+            last = claimed_dict.get(t)
+            if not last or last + timedelta(hours=24) <= now:
+                claimable.append(t)
 
-        points = len(claimable_tokens) * 10
-        if points == 0:
-            return jsonify({"success": False, "error": "All owned tokens are on 24-hour cooldown"}), 429
+        pts = len(claimable) * 10
+        if pts == 0:
+            return jsonify({"success": False, "error": "Tokens on 24h cooldown"}), 429
 
-        current = supabase.table("points").select("points").eq("address", owner.lower()).execute()
-        curr_pts = current.data[0]["points"] if current.data else 0
-        new_pts = curr_pts + points
+        # update totals
+        cur = supabase.table("points").select("points") \
+                       .eq("address", owner.lower()).execute().data
+        cur_pts = cur[0]["points"] if cur else 0
+        new_pts = cur_pts + pts
+        supabase.table("points").upsert({
+            "address": owner.lower(), "points": new_pts
+        }).execute()
 
-        supabase.table("points").upsert({"address": owner.lower(), "points": new_pts}).execute()
-        
-        now_iso = datetime.now().astimezone().isoformat()
-        claim_data = [{"token_id": t, "address": owner.lower(), "claimed_at": now_iso} for t in claimable_tokens]
-        if claim_data:
-            supabase.table("token_claims").upsert(claim_data).execute()
+        # record new claims
+        iso = now.isoformat()
+        upserts = [
+            {"token_id": t, "address": owner.lower(), "claimed_at": iso}
+            for t in claimable
+        ]
+        if upserts:
+            supabase.table("token_claims").upsert(upserts).execute()
 
-        return jsonify({"success": True, "points": points, "total_points": new_pts, "error": None})
+        return jsonify({"success": True, "points": pts, "total_points": new_pts, "error": None})
     except Exception as e:
         logger.error(f"Error in claim_points: {e}")
         return jsonify({"success": False, "error": str(e)}), 400
@@ -167,11 +186,14 @@ def claim_points():
 @app.route("/api/leaderboard", methods=["GET"])
 def get_leaderboard():
     try:
-        result = supabase.table("points").select("address, points").order("points", desc=True).limit(100).execute()
-        lb = [{"wallet": r["address"], "points": r["points"]} for r in result.data]
+        rows = supabase.table("points") \
+                       .select("address,points") \
+                       .order("points", desc=True).limit(100) \
+                       .execute().data
+        lb = [{"wallet": r["address"], "points": r["points"]} for r in rows]
         return jsonify({"leaderboard": lb, "error": None})
     except Exception as e:
-        logger.error(f"Error in get_leaderboard: {e}")
+        logger.error(f"Error in leaderboard: {e}")
         return jsonify({"leaderboard": [], "error": str(e)}), 500
 
 if __name__ == "__main__":
