@@ -8,17 +8,24 @@ from datetime import datetime, timedelta
 import logging
 
 app = Flask(__name__, static_folder="static")
-# Allow exactly your deployed origin (and localhost for dev) on ALL /api/* routes, including OPTIONS
+# CORS for all /api routes
 CORS(app,
-     resources={r"/api/*": {"origins": ["https://www.mymilio.xyz", "http://localhost:3000"]}},
+     resources={r"/api/*": {"origins": ["https://www.mymilio.xyz", "https://www.mymilio.xyz/", "http://localhost:3000"]}},
      supports_credentials=True)
 
-# serve a favicon.ico (put one under ./static/favicon.ico)
-@app.route("/favicon.ico")
-def favicon():
-    return send_from_directory(app.static_folder, "favicon.ico")
+@app.after_request
+def apply_cors(response):
+    response.headers["Access-Control-Allow-Origin"] = "https://www.mymilio.xyz"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type"
+    return response
 
-# ——— CONFIG ———
+# serve favicon
+@app.route('/favicon.ico')
+def favicon():
+    return send_from_directory(app.static_folder, 'favicon.ico')
+
+# —— CONFIG ——
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -67,20 +74,18 @@ def fetch_via_logs(c_addr, owner, start_block=0, chunk=100_000):
         for ev in logs:
             sig = ev["topics"][0].hex()
             if sig == TRANSFER_SIG:
-                frm_a = "0x" + ev["topics"][1].hex()[-40:]
-                to_a  = "0x" + ev["topics"][2].hex()[-40:]
+                frm_a = Web3.to_checksum_address("0x" + ev["topics"][1].hex()[-40:])
+                to_a  = Web3.to_checksum_address("0x" + ev["topics"][2].hex()[-40:])
                 tid   = int.from_bytes(ev["topics"][3], "big")
                 if to_a.lower() == owner_lc:
                     myset.add(tid)
                 if frm_a.lower() == owner_lc:
                     myset.discard(tid)
-
             elif sig == CONS_SIG:
                 ft = int(ev["topics"][1].hex(), 16)
                 tt = int(ev["topics"][2].hex(), 16)
-                fa = "0x" + ev["topics"][3].hex()[-40:]
-                # consecutive uses data field for `to`
-                ta = "0x" + ev["data"].hex()[-40:]
+                fa = Web3.to_checksum_address("0x" + ev["topics"][3].hex()[-40:])
+                ta = Web3.to_checksum_address("0x" + ev["data"].hex()[-40:])
                 if ta.lower() == owner_lc:
                     myset.update(range(ft, tt + 1))
                 if fa.lower() == owner_lc:
@@ -112,10 +117,6 @@ def index():
 
 @app.route("/api/tokens", methods=["POST"])
 def get_tokens():
-    """
-    Expects form-data: owner=<0x...>
-    Returns {"tokens": [...], "error": null} (never 404 or missing CORS)
-    """
     try:
         owner = Web3.to_checksum_address(request.form["owner"].strip())
         toks = fetch_my_tokens(CONTRACT_ADDRESS, owner)
@@ -123,7 +124,6 @@ def get_tokens():
         return jsonify({"tokens": toks, "error": None})
     except Exception as e:
         logger.error(f"Error in get_tokens: {e}")
-        # still return 200 + empty array so CORS + JSON parse keep working
         return jsonify({"tokens": [], "error": str(e)})
 
 @app.route("/api/claim_points", methods=["POST"])
@@ -140,14 +140,8 @@ def claim_points():
         if not tokens:
             return jsonify({"success": False, "error": "No valid tokens (1–4269)"}), 400
 
-        # load past claims
-        rows = supabase.table("token_claims") \
-                       .select("token_id,claimed_at") \
-                       .in_("token_id", tokens).execute().data
-        claimed_dict = {
-            r["token_id"]: datetime.fromisoformat(r["claimed_at"].replace("Z", "+00:00"))
-            for r in rows
-        }
+        rows = supabase.table("token_claims").select("token_id,claimed_at").in_("token_id", tokens).execute().data
+        claimed_dict = {r["token_id"]: datetime.fromisoformat(r["claimed_at"].replace("Z", "+00:00")) for r in rows}
 
         claimable = []
         now = datetime.now().astimezone()
@@ -160,21 +154,13 @@ def claim_points():
         if pts == 0:
             return jsonify({"success": False, "error": "Tokens on 24h cooldown"}), 429
 
-        # update totals
-        cur = supabase.table("points").select("points") \
-                       .eq("address", owner.lower()).execute().data
+        cur = supabase.table("points").select("points").eq("address", owner.lower()).execute().data
         cur_pts = cur[0]["points"] if cur else 0
         new_pts = cur_pts + pts
-        supabase.table("points").upsert({
-            "address": owner.lower(), "points": new_pts
-        }).execute()
+        supabase.table("points").upsert({"address": owner.lower(), "points": new_pts}).execute()
 
-        # record new claims
         iso = now.isoformat()
-        upserts = [
-            {"token_id": t, "address": owner.lower(), "claimed_at": iso}
-            for t in claimable
-        ]
+        upserts = [{"token_id": t, "address": owner.lower(), "claimed_at": iso} for t in claimable]
         if upserts:
             supabase.table("token_claims").upsert(upserts).execute()
 
@@ -186,10 +172,7 @@ def claim_points():
 @app.route("/api/leaderboard", methods=["GET"])
 def get_leaderboard():
     try:
-        rows = supabase.table("points") \
-                       .select("address,points") \
-                       .order("points", desc=True).limit(100) \
-                       .execute().data
+        rows = supabase.table("points").select("address,points").order("points", desc=True).limit(100).execute().data
         lb = [{"wallet": r["address"], "points": r["points"]} for r in rows]
         return jsonify({"leaderboard": lb, "error": None})
     except Exception as e:
