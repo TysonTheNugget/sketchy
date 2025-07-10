@@ -8,25 +8,29 @@ from datetime import datetime, timedelta
 import logging
 
 app = Flask(__name__, static_folder="static", template_folder="templates")
-CORS(app, resources={r"/api/*": {"origins": ["https://www.mymilio.xyz", "https://www.mymilio.xyz/", "http://localhost:3000"]}}, supports_credentials=True)
-
-@app.after_request
-def apply_cors(response):
-    response.headers["Access-Control-Allow-Origin"] = "https://www.mymilio.xyz"
-    response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
-    response.headers["Access-Control-Allow-Headers"] = "Content-Type"
-    return response
+# Simplified CORS configuration
+CORS(app, resources={
+    r"/api/*": {
+        "origins": ["https://www.mymilio.xyz", "http://localhost:3000"],
+        "methods": ["GET", "POST", "OPTIONS"],
+        "allow_headers": ["Content-Type"],
+        "supports_credentials": True
+    }
+})
 
 @app.route('/favicon.ico')
 def favicon():
-    return send_from_directory(app.static_folder, 'favicon.ico')
+    try:
+        return send_from_directory(app.static_folder, 'favicon.ico')
+    except:
+        return '', 204  # No favicon, return empty response
 
 # —— CONFIG ——
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 RPC_URL = os.getenv("RPC_URL", "https://api.mainnet.abs.xyz")
-w3 = Web3(Web3.HTTPProvider(RPC_URL, request_kwargs={'timeout': 30}))  # Add timeout
+w3 = Web3(Web3.HTTPProvider(RPC_URL, request_kwargs={'timeout': 30}))
 if not w3.is_connected():
     logger.error("Failed to connect to Abstract RPC")
     raise RuntimeError("❌ Could not connect to Abstract RPC")
@@ -69,7 +73,7 @@ def fetch_via_enumeration(c_addr, owner):
         logger.warning(f"Unexpected error in enumeration for {owner}: {e}")
         return []
 
-def fetch_via_logs(c_addr, owner, start_block=0, chunk=50_000):  # Reduced chunk size
+def fetch_via_logs(c_addr, owner, start_block=0, chunk=50_000):
     if not is_valid_address(owner):
         logger.error(f"Invalid address: {owner}")
         return []
@@ -84,7 +88,7 @@ def fetch_via_logs(c_addr, owner, start_block=0, chunk=50_000):  # Reduced chunk
                 "fromBlock": frm,
                 "toBlock": to,
                 "address": c_addr,
-                "topics": [[TRANSFER_SIG, CONS_SIG]]  # Specify valid topics
+                "topics": [[TRANSFER_SIG, CONS_SIG]]
             })
             for ev in logs:
                 sig = ev["topics"][0].hex()
@@ -135,8 +139,10 @@ def index():
                 error = f"🚨 Error fetching tokens: {e}"
     return render_template("index.html", error=error, user_toks=user_toks)
 
-@app.route("/api/tokens", methods=["POST"])
+@app.route("/api/tokens", methods=["POST", "OPTIONS"])
 def get_tokens():
+    if request.method == "OPTIONS":
+        return '', 204  # Handle CORS preflight
     try:
         owner = request.form.get("owner", "").strip()
         if not is_valid_address(owner):
@@ -149,8 +155,10 @@ def get_tokens():
         logger.error(f"Error in get_tokens for {owner}: {e}")
         return jsonify({"tokens": [], "error": str(e)}), 400
 
-@app.route("/api/claim_points", methods=["POST"])
+@app.route("/api/claim_points", methods=["POST", "OPTIONS"])
 def claim_points():
+    if request.method == "OPTIONS":
+        return '', 204
     try:
         owner = request.form.get("owner", "").strip()
         if not is_valid_address(owner):
