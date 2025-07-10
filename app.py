@@ -1,5 +1,7 @@
-from flask import Flask, render_template, request, jsonify, send_from_directory
+from flask import Flask, render_template, request, jsonify, send_from_directory, redirect
 from flask_cors import CORS
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 from web3 import Web3
 from web3.exceptions import ContractLogicError
 import os
@@ -8,7 +10,6 @@ from datetime import datetime, timedelta
 import logging
 
 app = Flask(__name__, static_folder="static", template_folder="templates")
-# Simplified CORS configuration
 CORS(app, resources={
     r"/api/*": {
         "origins": ["https://www.mymilio.xyz", "http://localhost:3000"],
@@ -17,6 +18,13 @@ CORS(app, resources={
         "supports_credentials": True
     }
 })
+
+# Rate limiting to prevent API abuse
+limiter = Limiter(
+    app=app,
+    key_func=get_remote_address,
+    default_limits=["100 per day", "10 per minute"]
+)
 
 @app.route('/favicon.ico')
 def favicon():
@@ -32,12 +40,16 @@ def serve_metadata(filename):
     except:
         return jsonify({"error": "Metadata not found"}), 404
 
+@app.route("/api/tokens'")
+def fix_bot_request():
+    return redirect("/api/tokens", code=301)
+
 # —— CONFIG ——
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 RPC_URL = os.getenv("RPC_URL", "https://api.mainnet.abs.xyz")
-w3 = Web3(Web3.HTTPProvider(RPC_URL, request_kwargs={'timeout': 30}))
+w3 = Web3(Web3.HTTPProvider(RPC_URL, request_kwargs={'timeout': 15}))
 if not w3.is_connected():
     logger.error("Failed to connect to Abstract RPC")
     raise RuntimeError("❌ Could not connect to Abstract RPC")
@@ -80,7 +92,7 @@ def fetch_via_enumeration(c_addr, owner):
         logger.warning(f"Unexpected error in enumeration for {owner}: {e}")
         return []
 
-def fetch_via_logs(c_addr, owner, start_block=0, chunk=50_000):
+def fetch_via_logs(c_addr, owner, start_block=0, chunk=5_000):
     if not is_valid_address(owner):
         logger.error(f"Invalid address: {owner}")
         return []
@@ -131,22 +143,26 @@ def fetch_my_tokens(c_addr, owner):
 
 @app.route("/", methods=["GET", "POST"])
 def index():
-    error = None
-    user_toks = None
-    if request.method == "POST":
-        raw_o = request.form.get("owner", "").strip()
-        if not is_valid_address(raw_o):
-            error = "Invalid wallet address"
-        else:
-            try:
-                chk = Web3.to_checksum_address(raw_o)
-                user_toks = fetch_my_tokens(CONTRACT_ADDRESS, chk)
-            except Exception as e:
-                logger.error(f"Error fetching tokens for {raw_o}: {e}")
-                error = f"🚨 Error fetching tokens: {e}"
-    return render_template("index.html", error=error, user_toks=user_toks)
+    try:
+        error = None
+        user_toks = None
+        if request.method == "POST":
+            raw_o = request.form.get("owner", "").strip()
+            if not is_valid_address(raw_o):
+                error = "Invalid wallet address"
+            else:
+                try:
+                    chk = Web3.to_checksum_address(raw_o)
+                    user_toks = fetch_my_tokens(CONTRACT_ADDRESS, chk)
+                except Exception as e:
+                    logger.error(f"Error fetching tokens for {raw_o}: {e}")
+                    error = f"🚨 Error fetching tokens: {e}"
+        return render_template("index.html", error=error, user_toks=user_toks)
+    except:
+        return jsonify({"error": "Visit https://www.mymilio.xyz for the main application"}), 404
 
 @app.route("/api/tokens", methods=["POST", "OPTIONS"])
+@limiter.limit("10 per minute")
 def get_tokens():
     if request.method == "OPTIONS":
         return '', 204
@@ -163,6 +179,7 @@ def get_tokens():
         return jsonify({"tokens": [], "error": str(e)}), 400
 
 @app.route("/api/claim_points", methods=["POST", "OPTIONS"])
+@limiter.limit("5 per minute")
 def claim_points():
     if request.method == "OPTIONS":
         return '', 204
@@ -211,6 +228,7 @@ def claim_points():
         return jsonify({"success": False, "error": str(e)}), 400
 
 @app.route("/api/leaderboard", methods=["GET", "OPTIONS"])
+@limiter.limit("20 per minute")
 def get_leaderboard():
     if request.method == "OPTIONS":
         return '', 204
