@@ -23,7 +23,14 @@ def favicon():
     try:
         return send_from_directory(app.static_folder, 'favicon.ico')
     except:
-        return '', 204  # No favicon, return empty response
+        return '', 204
+
+@app.route('/static/metadata/<path:filename>')
+def serve_metadata(filename):
+    try:
+        return send_from_directory(os.path.join(app.static_folder, 'metadata'), filename)
+    except:
+        return jsonify({"error": "Metadata not found"}), 404
 
 # —— CONFIG ——
 logging.basicConfig(level=logging.INFO)
@@ -142,7 +149,7 @@ def index():
 @app.route("/api/tokens", methods=["POST", "OPTIONS"])
 def get_tokens():
     if request.method == "OPTIONS":
-        return '', 204  # Handle CORS preflight
+        return '', 204
     try:
         owner = request.form.get("owner", "").strip()
         if not is_valid_address(owner):
@@ -203,8 +210,10 @@ def claim_points():
         logger.error(f"Error in claim_points: {e}")
         return jsonify({"success": False, "error": str(e)}), 400
 
-@app.route("/api/leaderboard", methods=["GET"])
+@app.route("/api/leaderboard", methods=["GET", "OPTIONS"])
 def get_leaderboard():
+    if request.method == "OPTIONS":
+        return '', 204
     try:
         rows = supabase.table("points").select("address,points").order("points", desc=True).limit(100).execute().data
         lb = [{"wallet": r["address"], "points": r["points"]} for r in rows]
