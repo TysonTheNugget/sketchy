@@ -7,11 +7,8 @@ from supabase import create_client, Client
 from datetime import datetime, timedelta
 import logging
 
-app = Flask(__name__, static_folder="static")
-# CORS for all /api routes
-CORS(app,
-     resources={r"/api/*": {"origins": ["https://www.mymilio.xyz", "https://www.mymilio.xyz/", "http://localhost:3000"]}},
-     supports_credentials=True)
+app = Flask(__name__, static_folder="static", template_folder="templates")
+CORS(app, resources={r"/api/*": {"origins": ["https://www.mymilio.xyz", "https://www.mymilio.xyz/", "http://localhost:3000"]}}, supports_credentials=True)
 
 @app.after_request
 def apply_cors(response):
@@ -20,7 +17,6 @@ def apply_cors(response):
     response.headers["Access-Control-Allow-Headers"] = "Content-Type"
     return response
 
-# serve favicon
 @app.route('/favicon.ico')
 def favicon():
     return send_from_directory(app.static_folder, 'favicon.ico')
@@ -30,7 +26,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 RPC_URL = os.getenv("RPC_URL", "https://api.mainnet.abs.xyz")
-w3 = Web3(Web3.HTTPProvider(RPC_URL))
+w3 = Web3(Web3.HTTPProvider(RPC_URL, request_kwargs={'timeout': 30}))  # Add timeout
 if not w3.is_connected():
     logger.error("Failed to connect to Abstract RPC")
     raise RuntimeError("❌ Could not connect to Abstract RPC")
@@ -41,7 +37,7 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 CONTRACT_ADDRESS = Web3.to_checksum_address("0x08533A2b16e3db03eeBD5b23210122f97dfcb97d")
 TRANSFER_SIG = w3.keccak(text="Transfer(address,address,uint256)").hex()
-CONS_SIG     = w3.keccak(text="ConsecutiveTransfer(uint256,uint256,address,address)").hex()
+CONS_SIG = w3.keccak(text="ConsecutiveTransfer(uint256,uint256,address,address)").hex()
 
 ERC721_ENUM_ABI = [
     {"constant": True, "inputs": [{"name": "_owner", "type": "address"}],
@@ -50,12 +46,33 @@ ERC721_ENUM_ABI = [
      "name": "tokenOfOwnerByIndex", "outputs": [{"name": "", "type": "uint256"}], "type": "function"}
 ]
 
-def fetch_via_enumeration(c_addr, owner):
-    c = w3.eth.contract(address=c_addr, abi=ERC721_ENUM_ABI)
-    bal = c.functions.balanceOf(owner).call()
-    return [c.functions.tokenOfOwnerByIndex(owner, i).call() for i in range(bal)]
+def is_valid_address(address):
+    try:
+        return Web3.is_address(address) and Web3.to_checksum_address(address)
+    except:
+        return False
 
-def fetch_via_logs(c_addr, owner, start_block=0, chunk=100_000):
+def fetch_via_enumeration(c_addr, owner):
+    if not is_valid_address(owner):
+        logger.error(f"Invalid address: {owner}")
+        return []
+    try:
+        c = w3.eth.contract(address=c_addr, abi=ERC721_ENUM_ABI)
+        bal = c.functions.balanceOf(owner).call()
+        if bal == 0:
+            return []
+        return [c.functions.tokenOfOwnerByIndex(owner, i).call() for i in range(bal)]
+    except ContractLogicError as e:
+        logger.warning(f"Enumeration failed for {owner}: {e}")
+        return []
+    except Exception as e:
+        logger.warning(f"Unexpected error in enumeration for {owner}: {e}")
+        return []
+
+def fetch_via_logs(c_addr, owner, start_block=0, chunk=50_000):  # Reduced chunk size
+    if not is_valid_address(owner):
+        logger.error(f"Invalid address: {owner}")
+        return []
     owner_lc = owner.lower()
     latest = w3.eth.block_number
     myset = set()
@@ -64,42 +81,42 @@ def fetch_via_logs(c_addr, owner, start_block=0, chunk=100_000):
         to = min(frm + chunk - 1, latest)
         try:
             logs = w3.eth.get_logs({
-                "fromBlock": frm, "toBlock": to,
-                "address": c_addr, "topics": [None]
+                "fromBlock": frm,
+                "toBlock": to,
+                "address": c_addr,
+                "topics": [[TRANSFER_SIG, CONS_SIG]]  # Specify valid topics
             })
-        except ContractLogicError as e:
-            logger.warning(f"get_logs reverted on blocks {frm}-{to}: {e}")
+            for ev in logs:
+                sig = ev["topics"][0].hex()
+                if sig == TRANSFER_SIG:
+                    frm_a = Web3.to_checksum_address("0x" + ev["topics"][1].hex()[-40:])
+                    to_a = Web3.to_checksum_address("0x" + ev["topics"][2].hex()[-40:])
+                    tid = int.from_bytes(ev["topics"][3], "big")
+                    if to_a.lower() == owner_lc:
+                        myset.add(tid)
+                    if frm_a.lower() == owner_lc:
+                        myset.discard(tid)
+                elif sig == CONS_SIG:
+                    ft = int(ev["topics"][1].hex(), 16)
+                    tt = int(ev["topics"][2].hex(), 16)
+                    fa = Web3.to_checksum_address("0x" + ev["topics"][3].hex()[-40:])
+                    ta = Web3.to_checksum_address("0x" + ev["data"].hex()[-40:])
+                    if ta.lower() == owner_lc:
+                        myset.update(range(ft, tt + 1))
+                    if fa.lower() == owner_lc:
+                        for x in range(ft, tt + 1):
+                            myset.discard(x)
+        except Exception as e:
+            logger.warning(f"get_logs failed on blocks {frm}-{to}: {e}")
             continue
-
-        for ev in logs:
-            sig = ev["topics"][0].hex()
-            if sig == TRANSFER_SIG:
-                frm_a = Web3.to_checksum_address("0x" + ev["topics"][1].hex()[-40:])
-                to_a  = Web3.to_checksum_address("0x" + ev["topics"][2].hex()[-40:])
-                tid   = int.from_bytes(ev["topics"][3], "big")
-                if to_a.lower() == owner_lc:
-                    myset.add(tid)
-                if frm_a.lower() == owner_lc:
-                    myset.discard(tid)
-            elif sig == CONS_SIG:
-                ft = int(ev["topics"][1].hex(), 16)
-                tt = int(ev["topics"][2].hex(), 16)
-                fa = Web3.to_checksum_address("0x" + ev["topics"][3].hex()[-40:])
-                ta = Web3.to_checksum_address("0x" + ev["data"].hex()[-40:])
-                if ta.lower() == owner_lc:
-                    myset.update(range(ft, tt + 1))
-                if fa.lower() == owner_lc:
-                    for x in range(ft, tt + 1):
-                        myset.discard(x)
-
     return sorted(myset)
 
 def fetch_my_tokens(c_addr, owner):
-    try:
-        return fetch_via_enumeration(c_addr, owner)
-    except Exception as e:
-        logger.warning(f"Enumeration failed ({e}), falling back to logs")
-        return fetch_via_logs(c_addr, owner)
+    tokens = fetch_via_enumeration(c_addr, owner)
+    if not tokens:
+        logger.info(f"No tokens found via enumeration for {owner}, trying logs")
+        tokens = fetch_via_logs(c_addr, owner)
+    return tokens
 
 @app.route("/", methods=["GET", "POST"])
 def index():
@@ -107,29 +124,38 @@ def index():
     user_toks = None
     if request.method == "POST":
         raw_o = request.form.get("owner", "").strip()
-        try:
-            chk = Web3.to_checksum_address(raw_o)
-            user_toks = fetch_my_tokens(CONTRACT_ADDRESS, chk)
-        except Exception as e:
-            logger.error(f"Error fetching tokens: {e}")
-            error = f"🚨 {e}"
+        if not is_valid_address(raw_o):
+            error = "Invalid wallet address"
+        else:
+            try:
+                chk = Web3.to_checksum_address(raw_o)
+                user_toks = fetch_my_tokens(CONTRACT_ADDRESS, chk)
+            except Exception as e:
+                logger.error(f"Error fetching tokens for {raw_o}: {e}")
+                error = f"🚨 Error fetching tokens: {e}"
     return render_template("index.html", error=error, user_toks=user_toks)
 
 @app.route("/api/tokens", methods=["POST"])
 def get_tokens():
     try:
-        owner = Web3.to_checksum_address(request.form["owner"].strip())
+        owner = request.form.get("owner", "").strip()
+        if not is_valid_address(owner):
+            return jsonify({"tokens": [], "error": "Invalid wallet address"}), 400
+        owner = Web3.to_checksum_address(owner)
         toks = fetch_my_tokens(CONTRACT_ADDRESS, owner)
         logger.info(f"Fetched {len(toks)} tokens for {owner}")
         return jsonify({"tokens": toks, "error": None})
     except Exception as e:
-        logger.error(f"Error in get_tokens: {e}")
-        return jsonify({"tokens": [], "error": str(e)})
+        logger.error(f"Error in get_tokens for {owner}: {e}")
+        return jsonify({"tokens": [], "error": str(e)}), 400
 
 @app.route("/api/claim_points", methods=["POST"])
 def claim_points():
     try:
-        owner = Web3.to_checksum_address(request.form["owner"].strip())
+        owner = request.form.get("owner", "").strip()
+        if not is_valid_address(owner):
+            return jsonify({"success": False, "error": "Invalid wallet address"}), 400
+        owner = Web3.to_checksum_address(owner)
         logger.info(f"Claiming points for {owner}")
 
         tokens = fetch_my_tokens(CONTRACT_ADDRESS, owner)

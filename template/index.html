@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MyMilio Points Claim</title>
+</head>
+<body>
+    <h1>MyMilio Points Claim</h1>
+    <form method="POST" action="/">
+        <label for="owner">Wallet Address:</label>
+        <input type="text" id="owner" name="owner" required>
+        <button type="submit">Check Tokens</button>
+    </form>
+    {% if error %}
+        <p style="color: red;">{{ error }}</p>
+    {% endif %}
+    {% if user_toks %}
+        <h2>Your Tokens:</h2>
+        <ul>
+        {% for token in user_toks %}
+            <li>Token ID: {{ token }}</li>
+        {% endfor %}
+        </ul>
+    {% endif %}
+</body>
+</html>
